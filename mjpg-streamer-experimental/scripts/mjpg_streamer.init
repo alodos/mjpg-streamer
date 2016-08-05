@@ -1,0 +1,349 @@
+#! /bin/sh
+# /etc/init.d/mjpg_streamer
+### BEGIN INIT INFO
+# Provides:          mjpg_streamer
+# Required-Start:    $remote_fs $syslog $network
+# Required-Stop:     $remote_fs $syslog $network
+# Default-Start:     none
+# Default-Stop:      0 1 6
+# Short-Description: mjpg_streamer for webcam
+# Description:       Streams /dev/videoX to http://localhost:port/?action=stream_X.
+#  This script will start mjpg_streamer with plugins input_uvc and output_http.
+#  Service can auto search and stream all available video devices or stream only from devices selected in service start arguments.
+### END INIT INFO
+
+# For auto start: Default-Start:     2 3 4 5
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/bin
+DESC="MJPEG streaming video service"
+NAME="mjpg_streamer"
+APPNAME=$NAME
+APPPATH=/usr/local/bin
+LIBSPATH=/usr/local/lib/mjpg-streamer
+
+OPT_INPUT_RESOLUTION="320x240"
+OPT_INPUT_FPS="25"
+OPT_INPUT_NODYNCTRL=1
+OPT_OUTPUT_WWW="/usr/local/share/mjpg-streamer/www"
+OPT_OUTPUT_NOCOMMANDS=1
+OPT_OUTPUT_PORT=8090
+OPT_OUTPUT_CREDENTIALS=""
+#OPT_OUTPUT_CREDENTIALS="username:password"
+
+# Exit if the package is not installed
+[ -e "$APPPATH/$APPNAME" ] || exit 0
+
+# Read configuration variable file if it is present
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+# Some things that run always
+#touch /var/lock/mjpg-streamer
+
+f_message()
+{
+	echo "[mjpgs] $1"
+}
+
+get_app_pids()
+{
+	local appname_first=$(echo $APPNAME | awk '{ string=substr($0, 1, 1); print string; }' )
+	local appname_last=$(echo $APPNAME | awk '{ string=substr($0, 2); print string; }' )
+	local apppid=`ps aux | grep "[$appname_first]$appname_last\s*\-b" | awk '{ print $2; }'`
+	echo "$apppid"
+}
+
+#
+# Function that starts the daemon/service
+#
+do_start()
+{
+	# Return
+	#   0 if daemon has been started
+	#   1 if daemon was already running
+	#   2 if daemon could not be started
+
+	# Prepare input plugin arguments
+	INPUT_ARGS=""
+	if [ "$#" -le 1 ];
+	then
+		# Find all cameras devices
+		if [ ! -d /sys/class/video4linux ];
+		then
+			f_message "Could not find video4linux class directory"
+			return 2
+		fi
+
+		for did in /sys/class/video4linux/*;
+		do
+			[ -e $did ] || continue
+			[ -e $did/name ] || continue
+			dname="/dev/$(basename "$did")"
+
+			input_nodynctrl=""
+			if [ "$OPT_INPUT_NODYNCTRL" -eq 1 ];
+			then
+				input_nodynctrl="-n"
+			fi
+			INPUT_ARGS="$INPUT_ARGS -i \"$LIBSPATH/input_uvc.so -d $dname -r $OPT_INPUT_RESOLUTION -f $OPT_INPUT_FPS $input_nodynctrl\""
+		done
+	else
+		# Use devices from arguments
+		j=1
+		for i in "$@";
+		do
+			# Skip first service arguments (start, stop and etc.)
+			if [ "$j" -le 1 ];
+			then
+				j=$(($j+1))
+				continue
+			fi
+
+			# Check device exists, skip unknown
+			#if [ ! -e "$i" ];
+			if [ ! -e "/sys/class/video4linux/$(basename "$i")" ];
+			then
+				f_message "Could not find video device $i"
+				continue
+			fi
+
+			input_nodynctrl=""
+			if [ "$OPT_INPUT_NODYNCTRL" -eq 1 ];
+			then
+				input_nodynctrl="-n"
+			fi
+			INPUT_ARGS="$INPUT_ARGS -i \"$LIBSPATH/input_uvc.so -d $i -r $OPT_INPUT_RESOLUTION -f $OPT_INPUT_FPS $input_nodynctrl\""
+			j=$(($j+1))
+			f_message "Found $i: $INPUT_ARGS"
+		done
+	fi
+
+	if [ -z "$INPUT_ARGS" ];
+	then
+		f_message "Could not find video devices"
+		return 2
+	fi
+
+	# Prepare output plugin arguments
+	output_nocommands=""
+	if [ "$OPT_OUTPUT_NOCOMMANDS" -eq 1 ];
+	then
+		output_nocommands="-n"
+	fi
+	output_www=""
+	if [ -n "$OPT_OUTPUT_WWW" ];
+	then
+		output_www="-w $OPT_OUTPUT_WWW"
+	fi
+	output_credentials=""
+	if [ -n "$OPT_OUTPUT_CREDENTIALS" ];
+	then
+		output_credentials="-c $OPT_OUTPUT_CREDENTIALS"
+	fi
+	OUTPUT_ARGS="-o \"$LIBSPATH/output_http.so -p $OPT_OUTPUT_PORT $output_nocommands $output_www $output_credentials\""
+
+	# DO NOT use if used full pathes to libraries
+	#export LD_LIBRARY_PATH=$LIBSPATH
+
+	mcmd="$APPPATH/$APPNAME -b $INPUT_ARGS $OUTPUT_ARGS"
+	f_message "Run: $mcmd"
+	eval $mcmd
+	sleep 2
+
+	# Check if started by pid
+	apppid=$(get_app_pids)
+	[ -n "$apppid" ] || return 2
+
+	return 0
+}
+
+#
+# Function that stops the daemon/service
+#
+do_stop()
+{
+	# Return
+	#   0 if daemon has been stopped
+	#   1 if daemon was already stopped
+	#   2 if daemon could not be stopped or if a failure occurred
+
+	apppid=$(get_app_pids)
+	if [ -n "$apppid" ];
+	then
+		# MUST BE stopped correct only with SIGINT=2 (use ONLY signum for dash/bash/posix)
+		kill -2 $(echo "$apppid" | tr '\n' ' ')
+		#kill -9 $(echo "$apppid" | tr '\n' ' ')
+		# DO NOT use pkill by name because kill itself
+		#pkill -2 -e "$APPNAME"
+		sleep 2
+
+		# Check if stopped by pid
+		apppid=$(get_app_pids)
+		[ -n "$apppid" ] && return 2
+	fi
+
+	return 0
+}
+
+# Carry out specific functions when asked to by the system
+case "$1" in
+	start)
+		# May be started with pointed devices.
+		# Example: service start /dev/video0 /dev/video1
+		# Else it starts streaming for all /dev/videoX devices.
+
+		# Kill old process
+		apppid=$(get_app_pids)
+		if [ -n "$apppid" ];
+		then
+			# MUST BE stopped correct only with SIGINT=2 (use ONLY signum for dash/bash/posix)
+			kill -2 $(echo "$apppid" | tr '\n' ' ')
+			#kill -9 $(echo "$apppid" | tr '\n' ' ')
+			# DO NOT use pkill by name because kill itself
+			#pkill -2 -e "$APPNAME"
+			sleep 2
+
+			f_message "$NAME stopped"
+		fi
+
+		f_message "Starting $NAME..."
+
+		do_start $@
+		case "$?" in
+			0|1)
+				f_message "$NAME started"
+			;;
+			2)
+				f_message "Error: not started $NAME"
+				exit 1
+			;;
+		esac
+	;;
+	stop)
+		f_message "Stopping $NAME..."
+		do_stop
+		case "$?" in
+			0|1)
+				f_message "$NAME stopped"
+			;;
+			2)
+				f_message "Error: not stopped $NAME"
+				exit 1
+			;;
+		esac
+	;;
+	restart|force-reload)
+		f_message "Restarting $NAME..."
+
+		# Get old cmd and kill old process
+		apppid=$(get_app_pids)
+		if [ -n "$apppid" ];
+		then
+			# Get command line only from first process
+			apppid1=$(echo "$apppid" | head -n 1)
+			cmdtext=`cat -v /proc/${apppid1}/cmdline | sed 's/\^@/\n/g' && echo`
+
+			# MUST BE stopped correct only with SIGINT=2 (use ONLY signum for dash/bash/posix)
+			kill -2 $(echo "$apppid" | tr '\n' ' ')
+			#kill -9 $(echo "$apppid" | tr '\n' ' ')
+			# DO NOT use pkill by name because kill itself
+			#pkill -2 -e "$APPNAME"
+			sleep 2
+
+			# Check if stopped by pid
+			apppid=$(get_app_pids)
+			if [ -n "$apppid" ];
+			then
+				f_message "Error: not stopped $NAME"
+				exit 1
+			fi
+
+			cmdline=""
+			prev=""
+			IFS_BAK=$IFS
+			while IFS= read -r line;
+			do
+				tline=`echo $line | sed 's/^\ *//g'`
+
+				pref_prev2=$(echo $prev | awk '{ string=substr($0, 1, 2); print string; }' )
+				pref_prev7=$(echo $prev | awk '{ string=substr($0, 1, 7); print string; }' )
+				pref_prev8=$(echo $prev | awk '{ string=substr($0, 1, 8); print string; }' )
+
+				if [ "$pref_prev2" = "-i" ];
+				then
+					cmdline="$cmdline \"$tline\""
+				elif [ "$pref_prev7" = "--input" ];
+				then
+					cmdline="$cmdline \"$tline\""
+				elif [ "$pref_prev2" = "-o" ];
+				then
+					cmdline="$cmdline \"$tline\""
+				elif [ "$pref_prev8" = "--output" ];
+				then
+					cmdline="$cmdline \"$tline\""
+				else
+					cmdline="$cmdline $tline"
+				fi
+				prev="$tline"
+			# DONT USE bashisms, only POSIX
+			#done < <(echo "$cmdtext")
+			#done <<< "$cmdtext"
+			done << EOF
+$(echo "$cmdtext")
+EOF
+			# fix subshell vars issue
+			IFS=$IFS_BAK
+
+			# Special do_start
+			if [ -z "$cmdline" ];
+			then
+				f_message "Error: not restarted $NAME"
+				exit 1
+			fi
+
+			f_message "Run: $cmdline"
+			eval "$cmdline"
+			sleep 2
+
+			# Check if started by pid
+			apppid=$(get_app_pids)
+			if [ -n "$apppid" ];
+			then
+				f_message "Restarted $NAME"
+			else
+				f_message "Error: not restarted $NAME"
+				exit 1
+			fi
+		else
+			do_start $@
+			case "$?" in
+				0|1)
+					f_message "$NAME restarted"
+				;;
+				2)
+					f_message "Error: not restarted $NAME"
+					exit 1
+				;;
+			esac
+		fi
+	;;
+	status)
+		# Get status of first of such processes
+		apppid=$(get_app_pids)
+		if [ -n "$apppid" ];
+		then
+			apppid1=$(echo "$apppid" | head -n 1)
+			cmdline=`cat -v /proc/${apppid1}/cmdline | sed 's/\^@/\ /g' && echo`
+
+			f_message "$NAME is running with pid ${apppid}"
+			f_message "$NAME was started with the following command line: $cmdline"
+		else
+			f_message "$NAME is not running"
+			exit 3
+		fi
+	;;
+	*)
+		f_message "Usage: $0 {start [device]...|stop|status|restart [device]...|force-reload [device]...}"
+		exit 1
+	;;
+esac
+exit 0
